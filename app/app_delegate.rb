@@ -13,16 +13,15 @@ class AppDelegate
 
     @server_controller = ServerController.alloc.initWithNibName(nil, bundle: nil)
     @server_controller.title = 'Server'
+    @window.rootViewController = @server_controller
 
-    @main_controller = main_controller()
-    @main_controller.title = 'Test'
-
-    @tab_controller = UITabBarController.alloc.initWithNibName(nil, bundle: nil)
-    # @tab_controller.delegate = self
-    @tab_controller.viewControllers = [@server_controller, @main_controller].compact
-
-    #@window.rootViewController = nav_controller
-    @window.rootViewController = @tab_controller
+    #
+    #@main_controller = main_controller()
+    #@main_controller.title = 'Test'
+    #
+    #@tab_controller = UITabBarController.alloc.initWithNibName(nil, bundle: nil)
+    #@tab_controller.viewControllers = [@server_controller, @main_controller].compact
+    #@window.rootViewController = @tab_controller
 
     true
   end
@@ -121,7 +120,7 @@ class AppDelegate
 
   def on_tap_start_client
     logger.debug{'starting client...'}
-    @client ||= Client.new
+    @client ||= Client.new(self)
     unless @client.started?
       if @client.start(nil, nil)
         logger.debug{'started'}
@@ -137,5 +136,6 @@ class AppDelegate
     logger.debug{'stopped'}
   end
 
-
+  def on_received_broadcast(json, address_host)
+  end
 end

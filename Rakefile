@@ -23,4 +23,6 @@ Motion::Project::App.setup do |app|
   app.frameworks += %w{CoreAudio CoreData AudioToolbox}
 
   app.vendor_project('vendor/Audio', :static, :headers_dir => '.')
+
+  app.info_plist['UIBackgroundModes'] = ['audio']
 end

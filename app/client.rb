@@ -1,6 +1,11 @@
 class Client
   include ErrorHelper
 
+  def initialize(delegate)
+    @queue = Dispatch::Queue.send :new, "#{App.identifier}.client"
+    @delegate = delegate
+  end
+
   def started?
     @started
   end
@@ -8,10 +13,10 @@ class Client
   def start(host, port)
     stop if @started
 
-    @socket = GCDAsyncUdpSocket.alloc.initWithDelegate(self, delegateQueue:Dispatch::Queue.main.dispatch_object)
+    @socket = GCDAsyncUdpSocket.alloc.initWithDelegate(self, delegateQueue: @queue.dispatch_object)
 
-    @started = alert_errors {|ptr| @socket.bindToPort(Beacon::DEFAULT_PORT, error:ptr)} and
-        alert_errors {|ptr| @socket.joinMulticastGroup(Beacon::DEFAULT_HOST, error:ptr)} and
+    @started = alert_errors {|ptr| @socket.bindToPort(port, error:ptr)} and
+        alert_errors {|ptr| @socket.joinMulticastGroup(host, error:ptr)} and
           alert_errors {|ptr| @socket.beginReceiving(ptr)}
 
     if @started
@@ -43,9 +48,8 @@ class Client
   #     fromAddress:(NSData *)address
   #     withFilterContext:(id)filterContext;
   def udpSocket(sock, didReceiveData:data, fromAddress: address, withFilterContext:tag)
-    logger.debug{"data: #{data}, tag: #{tag}"}
-
-    # send it back for some reason as an ACK (maybe?)
-    @socket.sendData(data, toAddress:address, withTimeout:-1, tag:0)
+    address_host = GCDAsyncUdpSocket.hostFromAddress(address)
+    data_str = "#{data}"
+    @delegate.on_received_broadcast(data_str, address_host)
   end
 end

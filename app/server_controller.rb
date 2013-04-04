@@ -16,6 +16,8 @@ class ServerController < UIViewController
     pop_wav = NSURL.fileURLWithPath(File.join(NSBundle.mainBundle.resourcePath, 'pop.wav'))
     @pop_player = AVAudioPlayer.alloc.initWithContentsOfURL(pop_wav, error:nil)
     @pop_player.prepareToPlay
+
+    @client = Client.new(self)
   end
 
   def viewWillLayoutSubviews
@@ -30,6 +32,9 @@ class ServerController < UIViewController
 
   def viewWillDisappear(animated)
     NSNotificationCenter.defaultCenter.removeObserver(self, name:UIApplicationDidEnterBackgroundNotification, object:nil)
+
+    @transmit_switch.on = false
+    on_tap_stop_beacon
   end
 
   def on_entered_background
@@ -58,7 +63,7 @@ class ServerController < UIViewController
                textAlignment: UITextAlignmentCenter
     )
     @bpm_label.center = view.center
-    @bpm_label.frame = @bpm_label.frame.up(smallest_dim * 0.2)
+    @bpm_label.frame = @bpm_label.frame.up(smallest_dim * 0.4)
     view << @bpm_label
 
     # Knob
@@ -77,7 +82,7 @@ class ServerController < UIViewController
     set_fields(@knob.layer, shadowOffset: CGSizeMake(0,0), shadowColor: UIColor.blackColor.CGColor, shadowRadius: 20, shadowOpacity: 0.85)
 
     @knob.center = view.center
-    @knob.frame = @knob.frame.up(smallest_dim * 0.2)
+    @knob.frame = @knob.frame.up(smallest_dim * 0.4)
     view << @knob
 
     # Audio Switch
@@ -121,6 +126,28 @@ class ServerController < UIViewController
     view << @transmit_label
 
 
+    # Listen Switch
+    set_fields(@listen_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Listen')
+    @listen_switch.when(UIControlEventValueChanged){ on_toggle_listen(@listen_switch.on?) }
+    @listen_switch.sizeToFit
+    @listen_switch.frame = CGRect.make(origin: view.bounds.bottom_right, size: @listen_switch.frame.size).up(@listen_switch.frame.height * 2 + padding * 3).left(@listen_switch.frame.width + padding)
+    @listen_switch.onTintColor = UIColor.ocean_blue
+    view << @listen_switch
+
+    # Listen Label
+    set_fields(@listen_label ||= UILabel.alloc.initWithFrame(CGRectZero),
+               frame: @listen_switch.frame.up(@listen_switch.frame.height),
+               font: UIFont.boldSystemFontOfSize(UIFont.labelFontSize),
+               text: 'Listen',
+               textColor: UIColor.whiteColor,
+               shadowColor: 0x000000.uicolor,
+               backgroundColor: UIColor.clearColor,
+               textAlignment: UITextAlignmentCenter
+    )
+    view << @listen_label
+    
+    
+    
     # Vibrate Switch
     set_fields(@vibrate_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Vibrate')
     @vibrate_switch.when(UIControlEventValueChanged){ on_toggle_vibrate(@vibrate_switch.on?) }
@@ -145,17 +172,21 @@ class ServerController < UIViewController
   end
 
   def controlValueDidChange(new_value, sender:view)
-    #logger.debug{"new value: #{new_value}"}
+    logger.debug{"new value: #{new_value}"}
     @bpm_label.text = "#{new_value.round}"
 
     @beater.stop
 
     @last_sent = nil # reset beacon interval
 
-    @beater.start(new_value.round)
+    if @listen_switch and !@listen_switch.on?
+      @beater.start(new_value.round)
+    end
   end
 
   def on_tap_start_beacon
+    UIApplication.sharedApplication.idleTimerDisabled = true
+
     logger.debug{'starting beacon...'}
     @beacon ||= Beacon.new
     @beacon.start((data[:interval] || 500).to_f / 1000.0, Beacon::DEFAULT_HOST, Beacon::DEFAULT_PORT)
@@ -163,6 +194,8 @@ class ServerController < UIViewController
   end
 
   def on_tap_stop_beacon
+    UIApplication.sharedApplication.idleTimerDisabled = false
+
     logger.debug{'stopping beacon...'}
     @beacon.stop if @beacon
     logger.debug{'stopped'}
@@ -178,7 +211,7 @@ class ServerController < UIViewController
 
   def on_toggle_transmit(value)
     if value
-      @broadcast_socket ||= begin
+      @broadcast_socket = begin
         socket = GCDAsyncUdpSocket.alloc.initWithDelegate(self, delegateQueue: Dispatch::Queue.main.dispatch_object)
         if alert_errors {|ptr| socket.enableBroadcast(true, error:ptr)}
           socket
@@ -186,14 +219,26 @@ class ServerController < UIViewController
           nil
         end
       end
-    else
+    elsif @broadcast_socket
       @broadcast_socket.close
-      @broadcast_socket = nil
     end
   end
 
-  def on_beat(bpm, total_beats)
-    pulse(@bpm_label, 0.05, 1.25)
+  def on_toggle_listen(value)
+    if value
+      @client.start(DEFAULT_HOST, DEFAULT_PORT)
+      @bpm_label.textColor = @knob.color = @listen_switch.onTintColor
+    else
+      @bpm_label.textColor = @knob.color = @audio_switch.onTintColor
+      @client.stop
+      @beater.start(@knob.value.round)
+    end
+    @knob.setNeedsDisplay
+  end
+
+  def render_beat
+      pulse(@bpm_label, 0.05, 1.25)
+
     if @vibrate_switch.on?
       AudioHelper.vibrate()
     end
@@ -201,24 +246,47 @@ class ServerController < UIViewController
     if @audio_switch.on?
       @pop_player.play
     end
+  end
 
-    if @transmit_switch.on?
-      send_broadcast(bpm: bpm, beats: total_beats)
+  def on_beat(bpm, total_beats)
+    unless @listen_switch.on?
+      render_beat
+      if @transmit_switch.on?
+        beat_packet = BeatPacket.new
+        beat_packet.bpm = bpm
+        beat_packet.beat = total_beats
+
+        send_broadcast(beat_packet)
+      end
     end
   end
 
-  def send_broadcast(data)
+  def send_broadcast(beat_packet)
     return unless @broadcast_socket
 
     @last_sent ||= Time.now
     local_latency = ((Time.now - @last_sent) * 1000).round
 
-    data[:interval] = local_latency
-    json_str = BW::JSON.generate(data)
-    logger.debug{"broadcasting: #{json_str}"}
-    encoded_data = json_str.dataUsingEncoding(NSUTF8StringEncoding)
+    beat_packet.interval = local_latency
+    #json_str = BW::JSON.generate(data)
+    logger.debug{"broadcasting: #{beat_packet}"}
+    encoded_data = beat_packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
     @broadcast_socket.sendData(encoded_data, toHost: DEFAULT_HOST, port: DEFAULT_PORT, withTimeout:-1, tag:1)
 
     @last_sent = Time.now
   end
+
+  def on_received_broadcast(data, address_host)
+    puts "#{address_host}: #{data}"
+
+    Dispatch::Queue.main.async do
+      render_beat
+
+      beat_packet = BeatPacket.parse(data)
+
+      @knob.value = beat_packet.bpm.to_i
+      @knob.setNeedsDisplay
+    end
+  end
+
 end
