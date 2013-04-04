@@ -5,8 +5,6 @@ class Beacon
   DEFAULT_HOST = '225.228.0.187'
   DEFAULT_PORT = 18709
 
-
-
   attr_accessor :total_beacons, :bpm, :host, :port
 
   def initialize
@@ -44,12 +42,17 @@ class Beacon
     @started = false
   end
 
-  def broadcast_package
+  def broadcast_package(bpm)
+    @total_beacons ||= 0
+    @last_sent ||= Time.now
+    @host ||= DEFAULT_HOST
+    @port ||= DEFAULT_PORT
+
     @total_beacons += 1
 
     local_latency = (Time.now - @last_sent) * 1000.0
 
-    decoded_data = "#{@total_beacons}|#{local_latency.round}|#{@bpm}\n"
+    decoded_data = "bpm|#{@total_beacons}|#{local_latency.round}|#{@bpm}\n"
     # print decoded_data
     encoded_data = decoded_data.dataUsingEncoding(NSUTF8StringEncoding)
     @udp_socket.sendData(encoded_data, toHost: @host, port: @port, withTimeout:-1, tag:1)
