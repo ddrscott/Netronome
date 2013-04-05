@@ -20,7 +20,7 @@ class Client
           alert_errors {|ptr| @socket.beginReceiving(ptr)}
 
     if @started
-      @host = @socket.localHost
+      @host = host
       @port = @socket.localPort
       logger.debug{"@host => #{@host}, @port => #{@port}"}
     end
@@ -33,13 +33,12 @@ class Client
 
   def stop
     if @socket
-      alert_errors {|ptr| @socket.leaveMulticastGroup(Beacon::DEFAULT_HOST, error:ptr) }
+      alert_errors {|ptr| @socket.leaveMulticastGroup(@host, error:ptr) }
       @socket.close
       @socket = nil
     end
     @started = false
   end
-
 
   #  /**
   #   * Called when the socket has received the requested datagram.

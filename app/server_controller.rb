@@ -2,6 +2,9 @@ class ServerController < UIViewController
   include BubbleWrap::KVO
   include LayoutHelper
   include ErrorHelper
+  include MathHelper
+
+  BEACON_INTERVAL = 0.25
 
   MIN_BPM = 40
   MAX_BPM = 220
@@ -16,8 +19,9 @@ class ServerController < UIViewController
     pop_wav = NSURL.fileURLWithPath(File.join(NSBundle.mainBundle.resourcePath, 'pop.wav'))
     @pop_player = AVAudioPlayer.alloc.initWithContentsOfURL(pop_wav, error:nil)
     @pop_player.prepareToPlay
-
     @client = Client.new(self)
+    @timing_packets = []
+    @timing_mutex = Mutex.new
   end
 
   def viewWillLayoutSubviews
@@ -26,6 +30,10 @@ class ServerController < UIViewController
 
   def viewWillAppear(animated)
     super
+
+    EM.add_periodic_timer(1.0) do
+      @debug_label.text = "#{Time.now_ms}"; @debug_label.setNeedsDisplay
+    end
 
     NSNotificationCenter.defaultCenter.addObserver(self, selector: :on_entered_background, name:UIApplicationDidEnterBackgroundNotification, object:nil)
   end
@@ -39,9 +47,9 @@ class ServerController < UIViewController
 
   def on_entered_background
     logger.debug{'entered background'}
-    if @broadcast_socket
-      @broadcast_socket.close
-      @broadcast_socket = nil
+    if @beat_socket
+      @beat_socket.close
+      @beat_socket = nil
     end
   end
 
@@ -63,7 +71,7 @@ class ServerController < UIViewController
                textAlignment: UITextAlignmentCenter
     )
     @bpm_label.center = view.center
-    @bpm_label.frame = @bpm_label.frame.up(smallest_dim * 0.4)
+    @bpm_label.frame = @bpm_label.frame.up(smallest_dim * 0.33)
     view << @bpm_label
 
     # Knob
@@ -82,12 +90,12 @@ class ServerController < UIViewController
     set_fields(@knob.layer, shadowOffset: CGSizeMake(0,0), shadowColor: UIColor.blackColor.CGColor, shadowRadius: 20, shadowOpacity: 0.85)
 
     @knob.center = view.center
-    @knob.frame = @knob.frame.up(smallest_dim * 0.4)
+    @knob.frame = @knob.frame.up(smallest_dim * 0.33)
     view << @knob
 
     # Audio Switch
     set_fields(@audio_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Beep')
-    @audio_switch.when(UIControlEventValueChanged){ on_toggle_beep(@audio_switch.on?) }
+    @audio_switch.when(UIControlEventValueChanged){ keep_awake_if_needed }
     @audio_switch.sizeToFit
     @audio_switch.frame = CGRect.make(origin: view.bounds.bottom_left, size: @audio_switch.frame.size).up(@audio_switch.frame.height + padding).right(padding)
     @audio_switch.onTintColor = UIColor.pea_green
@@ -150,7 +158,7 @@ class ServerController < UIViewController
     
     # Vibrate Switch
     set_fields(@vibrate_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Vibrate')
-    @vibrate_switch.when(UIControlEventValueChanged){ on_toggle_vibrate(@vibrate_switch.on?) }
+    @vibrate_switch.when(UIControlEventValueChanged){ keep_awake_if_needed }
     @vibrate_switch.sizeToFit
     @vibrate_switch.frame = CGRect.make(origin: view.bounds.bottom_center, size: @vibrate_switch.frame.size).up(@vibrate_switch.frame.height + padding).left(@vibrate_switch.frame.width / 2)
     @vibrate_switch.onTintColor = UIColor.pea_green
@@ -167,8 +175,20 @@ class ServerController < UIViewController
                textAlignment: UITextAlignmentCenter
     )
     view << @vibrate_label
-    
-    $v = self
+
+    # Debug Label
+    debug_font = UIFont.boldSystemFontOfSize(12)
+    set_fields(@debug_label ||= UILabel.alloc.initWithFrame(CGRectZero),
+               frame: view.frame.height(debug_font.lineHeight).y(0),
+               font: debug_font,
+               textColor: UIColor.whiteColor,
+               backgroundColor: 0x111111.uicolor,
+               textAlignment: UITextAlignmentRight
+    )
+    set_fields(@debug_label.layer, shadowOffset: CGSizeMake(0,3), shadowColor: UIColor.blackColor.CGColor, shadowRadius: 3, shadowOpacity: 1)
+    view << @debug_label
+
+    $s = self
   end
 
   def controlValueDidChange(new_value, sender:view)
@@ -184,34 +204,16 @@ class ServerController < UIViewController
     end
   end
 
-  def on_tap_start_beacon
-    UIApplication.sharedApplication.idleTimerDisabled = true
-
-    logger.debug{'starting beacon...'}
-    @beacon ||= Beacon.new
-    @beacon.start((data[:interval] || 500).to_f / 1000.0, Beacon::DEFAULT_HOST, Beacon::DEFAULT_PORT)
-    logger.debug{'started'}
-  end
-
-  def on_tap_stop_beacon
-    UIApplication.sharedApplication.idleTimerDisabled = false
-
-    logger.debug{'stopping beacon...'}
-    @beacon.stop if @beacon
-    logger.debug{'stopped'}
-  end
-
-  def on_toggle_beep(value)
-
-  end
-
-  def on_toggle_vibrate(value)
-
+  def keep_awake_if_needed
+    keep_on = !!view.subviews.detect{|s| UISwitch === s and s.on?}
+    UIApplication.sharedApplication.idleTimerDisabled = keep_on
   end
 
   def on_toggle_transmit(value)
+    keep_awake_if_needed
+
     if value
-      @broadcast_socket = begin
+      @beat_socket = begin
         socket = GCDAsyncUdpSocket.alloc.initWithDelegate(self, delegateQueue: Dispatch::Queue.main.dispatch_object)
         if alert_errors {|ptr| socket.enableBroadcast(true, error:ptr)}
           socket
@@ -219,25 +221,35 @@ class ServerController < UIViewController
           nil
         end
       end
-    elsif @broadcast_socket
-      @broadcast_socket.close
+
+      @beacon ||= Beacon.new
+      @beacon.start(BEACON_INTERVAL, DEFAULT_HOST, DEFAULT_PORT)
+    elsif @beat_socket
+      @beat_socket.close
+      @beacon.stop
     end
   end
 
   def on_toggle_listen(value)
+    keep_awake_if_needed
+
+    @client.stop
+    @beater.stop
+
     if value
+      # reset samples
+      @last_timing_packet = nil
       @client.start(DEFAULT_HOST, DEFAULT_PORT)
+      wobble(@bpm_label, 0.25, 0.25)
       @bpm_label.textColor = @knob.color = @listen_switch.onTintColor
     else
       @bpm_label.textColor = @knob.color = @audio_switch.onTintColor
-      @client.stop
-      @beater.start(@knob.value.round)
     end
     @knob.setNeedsDisplay
   end
 
   def render_beat
-      pulse(@bpm_label, 0.05, 1.25)
+    pulse(@bpm_label, 0.05, 1.25)
 
     if @vibrate_switch.on?
       AudioHelper.vibrate()
@@ -248,45 +260,108 @@ class ServerController < UIViewController
     end
   end
 
-  def on_beat(bpm, total_beats)
-    unless @listen_switch.on?
-      render_beat
-      if @transmit_switch.on?
-        beat_packet = BeatPacket.new
-        beat_packet.bpm = bpm
-        beat_packet.beat = total_beats
+  def on_beat(beater)
+    render_beat
 
-        send_broadcast(beat_packet)
-      end
+    if !@listen_switch.on? and @transmit_switch.on?
+      broadcast_beat
     end
   end
 
-  def send_broadcast(beat_packet)
-    return unless @broadcast_socket
-
-    @last_sent ||= Time.now
-    local_latency = ((Time.now - @last_sent) * 1000).round
-
-    beat_packet.interval = local_latency
-    #json_str = BW::JSON.generate(data)
-    logger.debug{"broadcasting: #{beat_packet}"}
-    encoded_data = beat_packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
-    @broadcast_socket.sendData(encoded_data, toHost: DEFAULT_HOST, port: DEFAULT_PORT, withTimeout:-1, tag:1)
-
-    @last_sent = Time.now
+  def broadcast_beat
+    unless @beat_socket
+      logger.error{'@broadcast_socket is nil'}
+      return
+    end
+    packet = BeatPacket.new(Time.now_ms, @beater.bpm)
+    logger.debug{"broadcasting: #{packet}"}
+    encoded_data = packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
+    @beat_socket.sendData(encoded_data, toHost: DEFAULT_HOST, port: DEFAULT_PORT, withTimeout:-1, tag:1)
   end
 
   def on_received_broadcast(data, address_host)
-    puts "#{address_host}: #{data}"
+    #puts "#{address_host}: #{data}"
 
-    Dispatch::Queue.main.async do
-      render_beat
-
-      beat_packet = BeatPacket.parse(data)
-
-      @knob.value = beat_packet.bpm.to_i
-      @knob.setNeedsDisplay
+    if data.index('bp|') == 0
+      packet = BeatPacket.parse(data)
+      on_beat_packet(packet)
+    elsif data.index('tm|') == 0
+      packet = TimingPacket.parse(data)
+      packet.received_ms = Time.now_ms
+      on_timing_packet(packet)
+    else
+      logger.warn{"unknown packet: #{data}"}
     end
   end
 
+  # TODO reset local beat timer to latency average
+  def on_beat_packet(packet)
+    Dispatch::Queue.main.async do
+
+      @last_received_beat = packet
+
+      @bpm_label.text = "#{@last_received_beat.bpm}"
+
+      @knob.delegate = nil
+      @knob.value = @last_received_beat.bpm
+      @knob.setNeedsDisplay
+      @knob.delegate = self
+    end
+  end
+
+  def on_timing_packet(packet)
+    print 't'
+
+    if @last_timing_packet.blank?
+      @timing_packets.clear
+    elsif (packet.received_ms - @last_timing_packet.received_ms) < packet.interval
+      @timing_packets.clear
+    elsif @last_timing_packet.time_ms < packet.time_ms # only consider packets in the correct order
+      # calc latency
+      @last_timing_packet.latency = packet.received_ms - @last_timing_packet.received_ms - @last_timing_packet.interval
+
+      @timing_packets << @last_timing_packet
+    end
+    @last_timing_packet = packet
+
+    if @timing_packets.size > 3
+      @timing_packets.shift
+
+      latencies = @timing_packets.collect{|c| c.latency}
+      std_dev = standard_deviation(latencies)
+
+      logger.debug{"std_dev => #{std_dev}, #{latencies}"}
+      if std_dev < 10
+        offsets = @timing_packets.collect do |tp|
+          s = tp.time_ms
+          c = tp.received_ms
+          l = tp.latency
+          offset = s - c - l
+          logger.debug{"l => #{l}, s => #{s}, c => #{c}, s - c => #{s - c}, offset: #{offset}"}
+          offset
+        end
+        avg_offset = mean(offsets)
+        Dispatch::Queue.main.async do
+          wobble(@bpm_label, false)
+
+          @beater.stop
+          @beater.start(@last_received_beat.bpm, @last_received_beat.time_ms - Time.now_ms + avg_offset)
+          @client.stop
+        end
+      end
+
+      #if @timing_packets.size > 10
+      #  # calc std deviation
+      #  latencies = @timing_packets.collect{|c| c.latency}
+      #  std_dev = standard_deviation(latencies)
+      #  # throw away stuff that's not in range
+      #
+      #  logger.debug{"#{latencies * ', '} => #{std_dev.round(2)}"}
+      #
+      #  @timing_packets.reject!{|r| r.latency > std_dev}
+      #else
+      #  # not enough packets
+      #end
+    end
+  end
 end

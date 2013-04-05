@@ -31,6 +31,23 @@ module LayoutHelper
     lay
   end
 
+  #def set_shadow(view, options)
+  #  layer = view.layer
+  #  options.each do |k, v|
+  #    begin
+  #      setter = "shadow#{k.to_s.camelcase}="
+  #      if layer.respond_to? setter
+  #        layer.send setter, v
+  #      else
+  #        logger.warn{"#{k} does not respond to #{setter}"}
+  #      end
+  #    rescue Exception
+  #      logger.error{"could not set field #{k} in #{view} due to #{$!.message}"}
+  #    end
+  #  end
+  #  view
+  #end
+
   def pulse(view, duration, scale)
     pulseAnimation = CABasicAnimation.animationWithKeyPath('transform.scale')
     pulseAnimation.duration = duration
@@ -40,5 +57,22 @@ module LayoutHelper
     pulseAnimation.repeatCount = 0
 
     view.layer.addAnimation(pulseAnimation, forKey:nil)
+  end
+
+  def wobble(view, duration_or_false = 0.13, rotation = 0.02)
+
+    if duration_or_false
+      shake = CABasicAnimation.animationWithKeyPath("transform")
+      shake.duration = duration_or_false
+      shake.autoreverses = true
+      shake.repeatCount  = 999_999_999_999.0
+      shake.removedOnCompletion = false
+      shake.fromValue = NSValue.valueWithCATransform3D(CATransform3DRotate(view.layer.transform,-rotation, 0.0 ,0.0 ,1.0))
+      shake.toValue   = NSValue.valueWithCATransform3D(CATransform3DRotate(view.layer.transform, rotation, 0.0 ,0.0 ,1.0))
+
+      view.layer.addAnimation(shake, forKey: 'wobble')
+    else
+      view.layer.removeAnimationForKey('wobble')
+    end
   end
 end
