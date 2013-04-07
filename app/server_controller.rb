@@ -2,7 +2,7 @@ class ServerController < UIViewController
   include BubbleWrap::KVO
   include LayoutHelper
   include ErrorHelper
-  include MathHelper
+  include DispatchHelper
 
   BEACON_INTERVAL = 0.25
 
@@ -31,10 +31,6 @@ class ServerController < UIViewController
   def viewWillAppear(animated)
     super
 
-    EM.add_periodic_timer(1.0) do
-      @debug_label.text = "#{Time.now_ms}"; @debug_label.setNeedsDisplay
-    end
-
     NSNotificationCenter.defaultCenter.addObserver(self, selector: :on_entered_background, name:UIApplicationDidEnterBackgroundNotification, object:nil)
   end
 
@@ -62,16 +58,18 @@ class ServerController < UIViewController
 
     # BPM Label
     set_fields(@bpm_label ||= UILabel.alloc.initWithFrame(CGRectZero),
-               frame: CGRect.make(width: 200, height: 50),
-               font: UIFont.boldSystemFontOfSize(50),
+               frame: CGRect.make(width: view.bounds.width, height: smallest_dim * 0.20),
+               font: UIFont.boldSystemFontOfSize(smallest_dim * 0.20),
                text: 'BPM',
                textColor: UIColor.pea_green,
                shadowColor: 0x000000.uicolor,
                backgroundColor: UIColor.clearColor,
                textAlignment: UITextAlignmentCenter
     )
-    @bpm_label.center = view.center
-    @bpm_label.frame = @bpm_label.frame.up(smallest_dim * 0.33)
+    @bpm_label.center = view.bounds.center
+    if view.bounds.height > view.bounds.width # portrait
+      @bpm_label.frame = @bpm_label.frame.up(smallest_dim * 0.1)
+    end
     view << @bpm_label
 
     # Knob
@@ -83,15 +81,28 @@ class ServerController < UIViewController
                        min: MIN_BPM,
                        max: MAX_BPM,
                        value: (MAX_BPM - MIN_BPM) / 2 + MIN_BPM,
-                       valueArcWidth: 25
+                       valueArcWidth: smallest_dim * 0.09
     )
     @knob.displaysValue = false
     @knob.allowsGestures = false
     set_fields(@knob.layer, shadowOffset: CGSizeMake(0,0), shadowColor: UIColor.blackColor.CGColor, shadowRadius: 20, shadowOpacity: 0.85)
-
-    @knob.center = view.center
-    @knob.frame = @knob.frame.up(smallest_dim * 0.33)
+    @knob.center = @bpm_label.center
     view << @knob
+
+
+    # Arc Label
+    set_fields(@arc_label ||= UILabel.alloc.initWithFrame(CGRectZero),
+               frame: CGRect.make(width: view.bounds.width, height: @knob.valueArcWidth),
+               font: UIFont.boldSystemFontOfSize(smallest_dim * 0.06),
+               text: 'BPM',
+               textColor: UIColor.pea_green,
+               shadowColor: 0x000000.uicolor,
+               backgroundColor: UIColor.clearColor,
+               textAlignment: UITextAlignmentCenter
+    )
+    @arc_label.center = @bpm_label.center
+    @arc_label.frame = @arc_label.frame.down(@knob.frame.height / 2).up(@arc_label.frame.height * 0.75)
+    view << @arc_label
 
     # Audio Switch
     set_fields(@audio_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Beep')
@@ -112,6 +123,27 @@ class ServerController < UIViewController
                textAlignment: UITextAlignmentCenter
     )
     view << @audio_label
+
+    # Vibrate Switch
+    set_fields(@vibrate_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Vibrate')
+    @vibrate_switch.when(UIControlEventValueChanged){ keep_awake_if_needed }
+    @vibrate_switch.sizeToFit
+    @vibrate_switch.frame = CGRect.make(origin: view.bounds.bottom_left, size: @vibrate_switch.frame.size).up(@vibrate_switch.frame.height * 2 + padding * 3).right(padding)
+    @vibrate_switch.onTintColor = UIColor.pea_green
+    view << @vibrate_switch
+
+    # Vibrate Label
+    set_fields(@vibrate_label ||= UILabel.alloc.initWithFrame(CGRectZero),
+               frame: @vibrate_switch.frame.up(@vibrate_switch.frame.height),
+               font: UIFont.boldSystemFontOfSize(UIFont.labelFontSize),
+               text: 'Vibrate',
+               textColor: UIColor.whiteColor,
+               shadowColor: 0x000000.uicolor,
+               backgroundColor: UIColor.clearColor,
+               textAlignment: UITextAlignmentCenter
+    )
+    view << @vibrate_label
+
 
     # Transmit Switch
     set_fields(@transmit_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Transmit')
@@ -155,32 +187,12 @@ class ServerController < UIViewController
     view << @listen_label
     
     
-    
-    # Vibrate Switch
-    set_fields(@vibrate_switch ||= UISwitch.alloc.initWithFrame(CGRectZero), accessibilityLabel: 'Vibrate')
-    @vibrate_switch.when(UIControlEventValueChanged){ keep_awake_if_needed }
-    @vibrate_switch.sizeToFit
-    @vibrate_switch.frame = CGRect.make(origin: view.bounds.bottom_center, size: @vibrate_switch.frame.size).up(@vibrate_switch.frame.height + padding).left(@vibrate_switch.frame.width / 2)
-    @vibrate_switch.onTintColor = UIColor.pea_green
-    view << @vibrate_switch
-
-    # Vibrate Label
-    set_fields(@vibrate_label ||= UILabel.alloc.initWithFrame(CGRectZero),
-               frame: @vibrate_switch.frame.up(@vibrate_switch.frame.height),
-               font: UIFont.boldSystemFontOfSize(UIFont.labelFontSize),
-               text: 'Vibrate',
-               textColor: UIColor.whiteColor,
-               shadowColor: 0x000000.uicolor,
-               backgroundColor: UIColor.clearColor,
-               textAlignment: UITextAlignmentCenter
-    )
-    view << @vibrate_label
-
     # Debug Label
     debug_font = UIFont.boldSystemFontOfSize(12)
     set_fields(@debug_label ||= UILabel.alloc.initWithFrame(CGRectZero),
-               frame: view.frame.height(debug_font.lineHeight).y(0),
+               frame: view.bounds.height(debug_font.lineHeight).y(0),
                font: debug_font,
+               text: 'Millis',
                textColor: UIColor.whiteColor,
                backgroundColor: 0x111111.uicolor,
                textAlignment: UITextAlignmentRight
@@ -213,6 +225,9 @@ class ServerController < UIViewController
     keep_awake_if_needed
 
     if value
+      start_debug_timer
+
+
       @beat_socket = begin
         socket = GCDAsyncUdpSocket.alloc.initWithDelegate(self, delegateQueue: Dispatch::Queue.main.dispatch_object)
         if alert_errors {|ptr| socket.enableBroadcast(true, error:ptr)}
@@ -237,8 +252,6 @@ class ServerController < UIViewController
     @beater.stop
 
     if value
-      # reset samples
-      @last_timing_packet = nil
       @client.start(DEFAULT_HOST, DEFAULT_PORT)
       wobble(@bpm_label, 0.25, 0.25)
       @bpm_label.textColor = @knob.color = @listen_switch.onTintColor
@@ -285,10 +298,6 @@ class ServerController < UIViewController
     if data.index('bp|') == 0
       packet = BeatPacket.parse(data)
       on_beat_packet(packet)
-    elsif data.index('tm|') == 0
-      packet = TimingPacket.parse(data)
-      packet.received_ms = Time.now_ms
-      on_timing_packet(packet)
     else
       logger.warn{"unknown packet: #{data}"}
     end
@@ -309,59 +318,43 @@ class ServerController < UIViewController
     end
   end
 
-  def on_timing_packet(packet)
-    print 't'
+  def on_local_offset_updated
+    logger.debug{"local offset should be: #{@client.local_offset}".ascii_cyan}
 
-    if @last_timing_packet.blank?
-      @timing_packets.clear
-    elsif (packet.received_ms - @last_timing_packet.received_ms) < packet.interval
-      @timing_packets.clear
-    elsif @last_timing_packet.time_ms < packet.time_ms # only consider packets in the correct order
-      # calc latency
-      @last_timing_packet.latency = packet.received_ms - @last_timing_packet.received_ms - @last_timing_packet.interval
+    @client.stop
+    Dispatch::Queue.main.async {start_debug_timer}
+    wobble(@bpm_label, false)
 
-      @timing_packets << @last_timing_packet
+    logger.debug{"starting beater at #{@last_received_beat.bpm} bpm"}
+    @beater.start(@last_received_beat.bpm)
+  end
+
+
+  def start_debug_timer
+    if @debug_timer
+      EM.cancel_timer(@debug_timer)
+      @debug_timer = nil
     end
-    @last_timing_packet = packet
 
-    if @timing_packets.size > 3
-      @timing_packets.shift
+    delay_till = if @client.server_time_ms
+      (@client.server_time_ms % 1000) / 1000.0
+    else
+      Time.till_next_second
+    end
 
-      latencies = @timing_packets.collect{|c| c.latency}
-      std_dev = standard_deviation(latencies)
-
-      logger.debug{"std_dev => #{std_dev}, #{latencies}"}
-      if std_dev < 10
-        offsets = @timing_packets.collect do |tp|
-          s = tp.time_ms
-          c = tp.received_ms
-          l = tp.latency
-          offset = s - c - l
-          logger.debug{"l => #{l}, s => #{s}, c => #{c}, s - c => #{s - c}, offset: #{offset}"}
-          offset
-        end
-        avg_offset = mean(offsets)
-        Dispatch::Queue.main.async do
-          wobble(@bpm_label, false)
-
-          @beater.stop
-          @beater.start(@last_received_beat.bpm, @last_received_beat.time_ms - Time.now_ms + avg_offset)
-          @client.stop
-        end
+    logger.debug{"delay_till => #{delay_till}".ascii_red}
+    @debug_timer = EM.add_periodic_timer(delay_till) do
+      if @beacon and @beacon.started?
+        @debug_label.text = "Beacon: #{@beacon.elapsed} ms";
+      elsif @client and @client.local_offset
+        @debug_label.text = "Est: #{(Time.now_ms + @client.local_offset).round} ms"
+      else
+        @debug_label.text = "Now: #{Time.now_ms} ms";
       end
+      @debug_label.setNeedsDisplay
 
-      #if @timing_packets.size > 10
-      #  # calc std deviation
-      #  latencies = @timing_packets.collect{|c| c.latency}
-      #  std_dev = standard_deviation(latencies)
-      #  # throw away stuff that's not in range
-      #
-      #  logger.debug{"#{latencies * ', '} => #{std_dev.round(2)}"}
-      #
-      #  @timing_packets.reject!{|r| r.latency > std_dev}
-      #else
-      #  # not enough packets
-      #end
+      # restart for next interval
+      start_debug_timer
     end
   end
 end

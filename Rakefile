@@ -17,7 +17,7 @@ Motion::Project::App.setup do |app|
   end
 
   # Defaults iPhone only
-  # app.device_family = [:iphone, :ipad]
+  app.device_family = [:iphone, :ipad]
   app.deployment_target = '5.1'
 
   app.frameworks += %w{CoreAudio CoreData AudioToolbox}
