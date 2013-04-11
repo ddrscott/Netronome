@@ -2,6 +2,8 @@ class Beacon
   include ErrorHelper
   include DispatchHelper
 
+  attr_reader :udp_socket
+
   def initialize
     @queue = Dispatch::Queue.send :new, "#{App.identifier}.beacon"
 
@@ -23,7 +25,7 @@ class Beacon
 
     @started = Time.now
 
-    delay_till_next_second do
+    @beacon_timer = delay_till_next_second do
       @beacon_timer = EM.add_periodic_timer(interval) do
         broadcast_package
       end
@@ -50,10 +52,12 @@ class Beacon
   def broadcast_package
     return unless @started
 
-    packet = TimingPacket.new(elapsed(), (@interval * 1000).to_i)
+    EM.schedule do
+      packet = TimingPacket.new(elapsed(), (@interval * 1000).to_i)
 
-    #logger.debug{"broadcasting: #{packet.to_s}"}
-    encoded_data = packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
-    @udp_socket.sendData(encoded_data, toHost: @host, port: @port, withTimeout:-1, tag:1)
+      # logger.debug{"broadcasting: #{packet.to_s}"}
+      encoded_data = packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
+      @udp_socket.sendData(encoded_data, toHost: @host, port: @port, withTimeout:-1, tag:1)
+    end
   end
 end

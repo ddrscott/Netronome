@@ -6,6 +6,7 @@ class ServerController < UIViewController
 
   BEACON_INTERVAL = 0.25
 
+  DEFAULT_BPM = 60
   MIN_BPM = 40
   MAX_BPM = 220
 
@@ -43,10 +44,6 @@ class ServerController < UIViewController
 
   def on_entered_background
     logger.debug{'entered background'}
-    if @beat_socket
-      @beat_socket.close
-      @beat_socket = nil
-    end
   end
 
   def init_views
@@ -60,7 +57,7 @@ class ServerController < UIViewController
     set_fields(@bpm_label ||= UILabel.alloc.initWithFrame(CGRectZero),
                frame: CGRect.make(width: view.bounds.width, height: smallest_dim * 0.20),
                font: UIFont.boldSystemFontOfSize(smallest_dim * 0.20),
-               text: 'BPM',
+               text: DEFAULT_BPM.to_s,
                textColor: UIColor.pea_green,
                shadowColor: 0x000000.uicolor,
                backgroundColor: UIColor.clearColor,
@@ -80,7 +77,7 @@ class ServerController < UIViewController
                        backgroundColorAlpha: 0.5,
                        min: MIN_BPM,
                        max: MAX_BPM,
-                       value: (MAX_BPM - MIN_BPM) / 2 + MIN_BPM,
+                       value: DEFAULT_BPM,
                        valueArcWidth: smallest_dim * 0.09
     )
     @knob.displaysValue = false
@@ -89,6 +86,7 @@ class ServerController < UIViewController
     @knob.center = @bpm_label.center
     view << @knob
 
+    observe(@knob, :value){|_, new_value| @bpm_label.text = "#{new_value.round}"}
 
     # Arc Label
     set_fields(@arc_label ||= UILabel.alloc.initWithFrame(CGRectZero),
@@ -205,13 +203,12 @@ class ServerController < UIViewController
 
   def controlValueDidChange(new_value, sender:view)
     logger.debug{"new value: #{new_value}"}
-    @bpm_label.text = "#{new_value.round}"
 
     @beater.stop
 
     @last_sent = nil # reset beacon interval
 
-    if @listen_switch and !@listen_switch.on?
+    if @listen_switch.blank? or !@listen_switch.on?
       @beater.start(new_value.round)
     end
   end
@@ -225,24 +222,12 @@ class ServerController < UIViewController
     keep_awake_if_needed
 
     if value
-      start_debug_timer
-
-
-      @beat_socket = begin
-        socket = GCDAsyncUdpSocket.alloc.initWithDelegate(self, delegateQueue: Dispatch::Queue.main.dispatch_object)
-        if alert_errors {|ptr| socket.enableBroadcast(true, error:ptr)}
-          socket
-        else
-          nil
-        end
-      end
-
       @beacon ||= Beacon.new
       @beacon.start(BEACON_INTERVAL, DEFAULT_HOST, DEFAULT_PORT)
-    elsif @beat_socket
-      @beat_socket.close
+    else
       @beacon.stop
     end
+    start_debug_timer
   end
 
   def on_toggle_listen(value)
@@ -254,9 +239,11 @@ class ServerController < UIViewController
     if value
       @client.start(DEFAULT_HOST, DEFAULT_PORT)
       wobble(@bpm_label, 0.25, 0.25)
-      @bpm_label.textColor = @knob.color = @listen_switch.onTintColor
+      @bpm_label.textColor = @knob.color = @arc_label.color = @listen_switch.onTintColor
     else
-      @bpm_label.textColor = @knob.color = @audio_switch.onTintColor
+      wobble(@bpm_label, false)
+      @bpm_label.textColor = @knob.color = @arc_label.color = @audio_switch.onTintColor
+      @beater.start(@knob.value.round)
     end
     @knob.setNeedsDisplay
   end
@@ -276,20 +263,19 @@ class ServerController < UIViewController
   def on_beat(beater)
     render_beat
 
-    if !@listen_switch.on? and @transmit_switch.on?
+    if @transmit_switch.on?
       broadcast_beat
     end
   end
 
   def broadcast_beat
-    unless @beat_socket
-      logger.error{'@broadcast_socket is nil'}
-      return
+    if @beacon and @beacon.started?
+      beat_time_ms = ((Time.now - @beacon.start_time) * 1000).round
+      packet = BeatPacket.new(beat_time_ms, @beater.bpm)
+      logger.debug{"broadcasting: #{packet}"}
+      encoded_data = packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
+      @beacon.udp_socket.sendData(encoded_data, toHost: DEFAULT_HOST, port: DEFAULT_PORT, withTimeout:-1, tag:1)
     end
-    packet = BeatPacket.new(Time.now_ms, @beater.bpm)
-    logger.debug{"broadcasting: #{packet}"}
-    encoded_data = packet.to_s.dataUsingEncoding(NSUTF8StringEncoding)
-    @beat_socket.sendData(encoded_data, toHost: DEFAULT_HOST, port: DEFAULT_PORT, withTimeout:-1, tag:1)
   end
 
   def on_received_broadcast(data, address_host)
@@ -305,56 +291,57 @@ class ServerController < UIViewController
 
   # TODO reset local beat timer to latency average
   def on_beat_packet(packet)
-    Dispatch::Queue.main.async do
+    if !@client.started? and @last_received_beat and @last_received_beat.bpm != packet.bpm
+      on_toggle_listen(true)
+    end
 
-      @last_received_beat = packet
-
-      @bpm_label.text = "#{@last_received_beat.bpm}"
-
+    @last_received_beat = packet
+    EM.schedule_on_main do
       @knob.delegate = nil
       @knob.value = @last_received_beat.bpm
-      @knob.setNeedsDisplay
       @knob.delegate = self
     end
   end
 
   def on_local_offset_updated
-    logger.debug{"local offset should be: #{@client.local_offset}".ascii_cyan}
+    logger.debug{"local offset should be: #{@client.local_offset}, my time is: #{Time.now_ms}, s - c => #{Time.now_ms + @client.local_offset}".ascii_cyan}
 
     @client.stop
-    Dispatch::Queue.main.async {start_debug_timer}
-    wobble(@bpm_label, false)
+    @beater.stop
+    Dispatch::Queue.main.async do
+      start_debug_timer
 
-    logger.debug{"starting beater at #{@last_received_beat.bpm} bpm"}
-    @beater.start(@last_received_beat.bpm)
+      wobble(@bpm_label, false)
+
+      if @last_received_beat
+        offset_ms = @client.server_time_ms - @last_received_beat.time_ms
+        beat_sec = 60.0 / @last_received_beat.bpm
+        logger.debug{"starting beater at #{@last_received_beat.bpm} bpm, beat time: #{@last_received_beat.time_ms}, s: #{@client.server_time_ms}, offset: #{offset_ms}"}
+        @beater.start(@last_received_beat.bpm, beat_sec - (offset_ms % beat_sec))
+      end
+    end
   end
 
-
   def start_debug_timer
-    if @debug_timer
-      EM.cancel_timer(@debug_timer)
-      @debug_timer = nil
-    end
+    EM.cancel_timer(@debug_timer) if @debug_timer
 
     delay_till = if @client.server_time_ms
-      (@client.server_time_ms % 1000) / 1000.0
+      @client.till_server_next_sec
     else
       Time.till_next_second
     end
 
-    logger.debug{"delay_till => #{delay_till}".ascii_red}
-    @debug_timer = EM.add_periodic_timer(delay_till) do
-      if @beacon and @beacon.started?
-        @debug_label.text = "Beacon: #{@beacon.elapsed} ms";
-      elsif @client and @client.local_offset
-        @debug_label.text = "Est: #{(Time.now_ms + @client.local_offset).round} ms"
-      else
-        @debug_label.text = "Now: #{Time.now_ms} ms";
+    @debug_timer = EM.add_timer(delay_till) do
+      @debug_timer = EM.add_periodic_timer(1.0) do
+        if @beacon and @beacon.started?
+          @debug_label.text = "Beacon: #{@beacon.elapsed} ms";
+        elsif @client.server_time_ms
+          @debug_label.text = "Est: #{(@client.server_time_ms).round} ms"
+        else
+          @debug_label.text = "Now: #{Time.now_ms} ms";
+        end
+        @debug_label.setNeedsDisplay
       end
-      @debug_label.setNeedsDisplay
-
-      # restart for next interval
-      start_debug_timer
     end
   end
 end

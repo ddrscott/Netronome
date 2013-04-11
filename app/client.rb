@@ -62,6 +62,8 @@ class Client
     address_host = GCDAsyncUdpSocket.hostFromAddress(address)
     data_str = "#{data}"
 
+    print 'p' if Device.simulator?
+
     if data_str.index('tm|') == 0
       packet = TimingPacket.parse(data_str)
       packet.received_ms = Time.now_ms
@@ -72,9 +74,10 @@ class Client
   end
 
   def on_timing_packet(packet)
-    print 't'
+    print 't' if Device.simulator?
 
     if @last_timing_packet.blank?
+      logger.debug{"first timing packet received."}
       @timing_packets.clear
     elsif (packet.received_ms - @last_timing_packet.received_ms) < packet.interval
       logger.debug{"received packet faster than interval?!?"}
@@ -101,11 +104,10 @@ class Client
           s = tp.time_ms
           c = tp.received_ms
           l = tp.latency
-          # logger.debug{"\tl => #{l}, s => #{s}, c => #{c}, s - c => #{s - c}"}
+          logger.debug{"\tl => #{l}, s => #{s}, c => #{c}, s - c => #{s - c}"}
           l - tp.interval
         end
         avg_latency = mean(offsets)
-        # logger.debug{"@last_timing_packet is #{@last_timing_packet.to_s}"}
 
         time_diff = @last_timing_packet.time_ms - @last_timing_packet.received_ms
 
@@ -124,5 +126,9 @@ class Client
     else
       nil
     end
+  end
+
+  def till_server_next_sec
+    1.0 - ((self.server_time_ms % 1000) / 1000.0)
   end
 end
