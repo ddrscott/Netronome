@@ -16,6 +16,7 @@ class Client
   def start(host, port)
     stop if @started
 
+    @accepted_host = nil
 
     @local_offset = nil
     @last_timing_packet = nil
@@ -60,14 +61,22 @@ class Client
   #     withFilterContext:(id)filterContext;
   def udpSocket(sock, didReceiveData:data, fromAddress: address, withFilterContext:tag)
     address_host = GCDAsyncUdpSocket.hostFromAddress(address)
-    data_str = "#{data}"
 
-    if data_str.index('tm|') == 0
-      packet = TimingPacket.parse(data_str)
-      packet.received_ms = Time.now_ms
-      on_timing_packet(packet)
-    else
-      @delegate.on_received_broadcast(data_str, address_host)
+    unless @accepted_host
+      @accepted_host = address_host
+      logger.debug{"@accepted_host => #{@accepted_host}".ascii_cyan_bg}
+    end
+
+    if address_host == @accepted_host
+      data_str = "#{data}"
+
+      if data_str.index('tm|') == 0
+        packet = TimingPacket.parse(data_str)
+        packet.received_ms = Time.now_ms
+        on_timing_packet(packet)
+      else
+        @delegate.on_received_broadcast(data_str, address_host)
+      end
     end
   end
 
