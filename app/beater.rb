@@ -6,14 +6,12 @@ class Beater
   def initialize(delegate)
     @delegate = delegate
 
-    @total_beats = 0
   end
 
   def start(bpm, offset=nil)
     @bpm = bpm
     @sec_per_beat = 60.0 / bpm
-
-    @ms_per_beat = (@sec_per_beat * 1000).round
+    @total_beats = 0
 
     @started ||= begin
       @beat_timer = EM.add_timer(offset || Time.till_next_second) do

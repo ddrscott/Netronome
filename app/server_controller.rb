@@ -209,7 +209,12 @@ class ServerController < UIViewController
     @last_sent = nil # reset beacon interval
 
     if @listen_switch.blank? or !@listen_switch.on?
-      @beater.start(new_value.round)
+      if @beacon and @beacon.started?
+        # start on beacon second
+        @beater.start(new_value.round, (1000 - (@beacon.elapsed % 1000)) / 1000.0)
+      else
+        @beater.start(new_value.round)
+      end
     end
   end
 
@@ -263,6 +268,10 @@ class ServerController < UIViewController
   def on_beat(beater)
     render_beat
 
+    if @client.local_offset and @beater.total_beats < 10
+      logger.debug{"beat server time: #{@client.server_time_ms}"}
+    end
+
     if @transmit_switch.on?
       broadcast_beat
     end
@@ -291,33 +300,42 @@ class ServerController < UIViewController
 
   # TODO reset local beat timer to latency average
   def on_beat_packet(packet)
-    if !@client.started? and @last_received_beat and @last_received_beat.bpm != packet.bpm
-      on_toggle_listen(true)
-    end
+    reset_beat = (@client.local_offset and @last_received_beat and @last_received_beat.bpm != packet.bpm)
 
     @last_received_beat = packet
     EM.schedule_on_main do
+      # update knob position, hide the delegate so we don't mess up the beat timer.
       @knob.delegate = nil
       @knob.value = @last_received_beat.bpm
       @knob.delegate = self
     end
+
+    on_local_offset_updated if reset_beat
   end
 
   def on_local_offset_updated
     logger.debug{"local offset should be: #{@client.local_offset}, my time is: #{Time.now_ms}, s - c => #{Time.now_ms + @client.local_offset}".ascii_cyan}
 
-    @client.stop
     @beater.stop
-    Dispatch::Queue.main.async do
-      start_debug_timer
 
+    EM.schedule_on_main do
+      start_debug_timer
       wobble(@bpm_label, false)
 
       if @last_received_beat
         offset_ms = @client.server_time_ms - @last_received_beat.time_ms
-        beat_sec = 60.0 / @last_received_beat.bpm
-        logger.debug{"starting beater at #{@last_received_beat.bpm} bpm, beat time: #{@last_received_beat.time_ms}, s: #{@client.server_time_ms}, offset: #{offset_ms}"}
-        @beater.start(@last_received_beat.bpm, beat_sec - (offset_ms % beat_sec))
+
+        beat_ms = (60000.0 / @last_received_beat.bpm).round
+
+        next_beat_ms = (offset_ms.to_f / beat_ms).ceil * beat_ms
+
+        next_delay = @last_received_beat.time_ms + next_beat_ms - @client.server_time_ms
+
+        logger.debug{"starting beater at #{@last_received_beat.bpm} bpm, beat time: #{@last_received_beat.time_ms}, s: #{@client.server_time_ms}, offset_ms: #{offset_ms}, next_delay: #{next_delay}"}
+
+        magic = BEACON_INTERVAL / 2 # FIXME why is this needed?!? everything always seems to be off without it
+
+        @beater.start(@last_received_beat.bpm, next_delay / 1000.0 - magic)
       end
     end
   end
